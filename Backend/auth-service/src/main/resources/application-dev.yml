@@ -1,0 +1,15 @@
+# LOCAL DEVELOPMENT ONLY. Never deploy with this profile.
+#
+# Your personal secrets (Gmail app password, Google client id...) go in ONE local file:
+#   auth-service/secrets.properties   (copy secrets.example.properties; it is git-ignored)
+# Values in that file override the defaults below. If the file doesn't exist, OTPs are printed to the console.
+spring:
+  config:
+    import: optional:file:./secrets.properties
+
+auth:
+  hash-pepper: dev-only-pepper-change-me-0123456789abcdef
+  otp:
+    sender: log
+  jwt:
+    allow-ephemeral-keys: true
