@@ -1,0 +1,85 @@
+spring:
+  application:
+    name: auth-service
+  profiles:
+    default: dev
+  mvc:
+    problemdetails:
+      enabled: true
+  jackson:
+    default-property-inclusion: non_null
+  # SMTP (used when auth.otp.sender=smtp). Free options: Gmail app password, Brevo, Amazon SES, Resend.
+  # Host and credentials MUST come from environment variables, never from this file:
+  #   SPRING_MAIL_HOST, SPRING_MAIL_USERNAME, SPRING_MAIL_PASSWORD (and SPRING_MAIL_PORT if not 587)
+  mail:
+    port: 587
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.starttls.enable: true
+      mail.smtp.starttls.required: true   # never send codes over an unencrypted connection
+      mail.smtp.connectiontimeout: 5000
+      mail.smtp.timeout: 5000
+      mail.smtp.writetimeout: 5000
+
+server:
+  port: 8080
+  # Only enable behind a TRUSTED reverse proxy / load balancer, otherwise clients can spoof their IP.
+  forward-headers-strategy: none
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-exception: false
+  tomcat:
+    max-swallow-size: 64KB
+    max-http-form-post-size: 16KB
+  max-http-request-header-size: 16KB
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+  health:
+    mail:
+      enabled: false
+
+auth:
+  # Secret key for HMAC-hashing OTPs and refresh tokens. Inject via env var AUTH_HASH_PEPPER (>= 32 chars).
+  hash-pepper: ${AUTH_HASH_PEPPER:}
+  otp:
+    length: 6
+    ttl: 10m
+    max-attempts: 5
+    resend-cooldown: 30s
+    sender: ${AUTH_OTP_SENDER:smtp}          # smtp | log (log = dev only)
+    mail-from: ${AUTH_OTP_MAIL_FROM:}        # e.g. "MyApp <no-reply@yourdomain.com>"
+    app-name: MyApp
+  jwt:
+    issuer: https://auth.myapp.example
+    audience: myapp-mobile
+    access-token-ttl: 15m
+    refresh-token-ttl: 30d
+    # Production: provide PEM files (X.509 public / PKCS#8 private) from your secret manager, e.g.
+    #   AUTH_JWT_PUBLICKEY=file:/run/secrets/jwt-public.pem
+    #   AUTH_JWT_PRIVATEKEY=file:/run/secrets/jwt-private.pem
+    # Startup fails if they are missing and ephemeral keys are not allowed.
+    allow-ephemeral-keys: false
+  google:
+    # The OAuth "Web application" client id from Google Cloud Console (the same value as
+    # googleWebClientId in the mobile app). Comma-separated for several. Empty = Google sign-in disabled.
+    client-ids: ${AUTH_GOOGLE_CLIENT_IDS:}
+  rate-limit:
+    otp-request-per-email: { limit: 5, window: 1h }
+    otp-request-per-ip: { limit: 20, window: 1h }
+    otp-verify-per-email: { limit: 10, window: 15m }
+    otp-verify-per-ip: { limit: 50, window: 15m }
+    external-sign-in-per-ip: { limit: 30, window: 15m }
+    refresh-per-ip: { limit: 60, window: 1m }
+
+logging:
+  level:
+    root: INFO
