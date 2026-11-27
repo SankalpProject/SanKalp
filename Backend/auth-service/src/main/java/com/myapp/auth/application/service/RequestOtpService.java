@@ -1,6 +1,9 @@
 package com.myapp.auth.application.service;
 
 import com.myapp.auth.application.port.in.RequestOtpUseCase;
+import com.myapp.auth.application.port.out.AuditLog;
+import com.myapp.auth.application.port.out.AuditLog.AuditEvent;
+import com.myapp.auth.application.port.out.AuditLog.EventType;
 import com.myapp.auth.application.port.out.OtpChallengeStore;
 import com.myapp.auth.application.port.out.OtpSender;
 import com.myapp.auth.application.port.out.SecretHasher;
@@ -8,8 +11,6 @@ import com.myapp.auth.application.port.out.SecureCodeGenerator;
 import com.myapp.auth.domain.exception.AuthException;
 import com.myapp.auth.domain.model.EmailAddress;
 import com.myapp.auth.domain.model.OtpChallenge;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -25,13 +26,12 @@ import java.util.Optional;
  */
 public final class RequestOtpService implements RequestOtpUseCase {
 
-    private static final Logger log = LoggerFactory.getLogger(RequestOtpService.class);
-
     private final OtpChallengeStore challengeStore;
     private final SecureCodeGenerator codeGenerator;
     private final SecretHasher hasher;
     private final OtpSender otpSender;
     private final RateLimitGuard rateLimitGuard;
+    private final AuditLog auditLog;
     private final OtpPolicy policy;
     private final Clock clock;
 
@@ -40,6 +40,7 @@ public final class RequestOtpService implements RequestOtpUseCase {
                              SecretHasher hasher,
                              OtpSender otpSender,
                              RateLimitGuard rateLimitGuard,
+                             AuditLog auditLog,
                              OtpPolicy policy,
                              Clock clock) {
         this.challengeStore = challengeStore;
@@ -47,6 +48,7 @@ public final class RequestOtpService implements RequestOtpUseCase {
         this.hasher = hasher;
         this.otpSender = otpSender;
         this.rateLimitGuard = rateLimitGuard;
+        this.auditLog = auditLog;
         this.policy = policy;
         this.clock = clock;
     }
@@ -54,17 +56,18 @@ public final class RequestOtpService implements RequestOtpUseCase {
     @Override
     public OtpRequested requestOtp(RequestOtpCommand command) {
         EmailAddress email = command.email();
+        String ip = command.clientIp();
         Instant now = clock.instant();
 
-        rateLimitGuard.check("otp:request:ip:" + command.clientIp(), policy.requestPerIp());
+        rateLimitGuard.check("otp_request_per_ip", ip, policy.requestPerIp(), ip);
         enforceResendCooldown(email, now);
-        rateLimitGuard.check("otp:request:email:" + email.value(), policy.requestPerEmail());
+        rateLimitGuard.check("otp_request_per_email", email.value(), policy.requestPerEmail(), ip);
 
         String code = codeGenerator.numericCode(policy.codeLength());
         challengeStore.save(OtpChallenge.issue(email, OtpCodeHashing.hash(hasher, email, code), now, policy.ttl()));
         otpSender.send(email, code, policy.ttl());
 
-        log.info("OTP issued email={}", email); // masked by EmailAddress.toString()
+        auditLog.record(AuditEvent.of(EventType.OTP_REQUESTED).method("email_otp").email(email).ip(ip));
         return new OtpRequested(policy.ttl(), policy.resendCooldown());
     }
 

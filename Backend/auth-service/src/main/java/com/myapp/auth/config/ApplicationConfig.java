@@ -1,6 +1,7 @@
 package com.myapp.auth.config;
 
 import com.myapp.auth.application.port.out.AccessTokenIssuer;
+import com.myapp.auth.application.port.out.AuditLog;
 import com.myapp.auth.application.port.out.ExternalIdentityVerifier;
 import com.myapp.auth.application.port.out.OtpChallengeStore;
 import com.myapp.auth.application.port.out.OtpSender;
@@ -20,18 +21,23 @@ import com.myapp.auth.application.service.VerifyOtpService;
 import com.myapp.auth.infrastructure.crypto.HmacSecretHasher;
 import com.myapp.auth.infrastructure.crypto.SecureRandomCodeGenerator;
 import com.myapp.auth.infrastructure.notification.DevLoggingOtpSender;
+import com.myapp.auth.infrastructure.observability.CompositeAuditLog;
+import com.myapp.auth.infrastructure.observability.LoggingAuditLog;
+import com.myapp.auth.infrastructure.observability.MetricsAuditLog;
+import com.myapp.auth.infrastructure.persistence.jdbc.JdbcAuditLog;
 import com.myapp.auth.infrastructure.notification.SmtpOtpSender;
 import com.myapp.auth.infrastructure.persistence.InMemoryOtpChallengeStore;
-import com.myapp.auth.infrastructure.persistence.InMemoryRefreshTokenStore;
-import com.myapp.auth.infrastructure.persistence.InMemoryUserRepository;
 import com.myapp.auth.infrastructure.ratelimit.InMemorySlidingWindowRateLimiter;
 import com.myapp.auth.infrastructure.security.GoogleIdTokenVerifier;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.mail.javamail.JavaMailSender;
 
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -85,15 +91,9 @@ public class ApplicationConfig {
         return new InMemoryOtpChallengeStore(clock);
     }
 
-    @Bean
-    InMemoryUserRepository userRepository() {
-        return new InMemoryUserRepository();
-    }
-
-    @Bean
-    InMemoryRefreshTokenStore refreshTokenStore(Clock clock) {
-        return new InMemoryRefreshTokenStore(clock);
-    }
+    // UserRepository + RefreshTokenStore come from PostgresPersistenceConfig or InMemoryPersistenceConfig,
+    // selected by auth.persistence. OTP challenges and rate limits stay in memory (single instance);
+    // swap these two for Redis adapters when running more than one instance.
 
     @Bean
     InMemorySlidingWindowRateLimiter rateLimiter(Clock clock) {
@@ -124,11 +124,23 @@ public class ApplicationConfig {
         return new GoogleIdTokenVerifier(props.google().clientIds());
     }
 
+    /**
+     * Audit trail fan-out: AUDIT log lines + Prometheus counters + PostgreSQL table (when persistence=postgres).
+     * {@code @Primary}: this composite is what services get; the individual sinks are internal.
+     */
+    @Bean
+    @Primary
+    AuditLog auditLog(MeterRegistry meterRegistry, ObjectProvider<JdbcAuditLog> databaseSink) {
+        List<AuditLog> sinks = new ArrayList<>(List.of(new LoggingAuditLog(), new MetricsAuditLog(meterRegistry)));
+        databaseSink.ifAvailable(sinks::add);
+        return new CompositeAuditLog(sinks);
+    }
+
     // ---------- Application services ----------
 
     @Bean
-    RateLimitGuard rateLimitGuard(RateLimiter rateLimiter) {
-        return new RateLimitGuard(rateLimiter);
+    RateLimitGuard rateLimitGuard(RateLimiter rateLimiter, AuditLog auditLog) {
+        return new RateLimitGuard(rateLimiter, auditLog);
     }
 
     @Bean
@@ -139,27 +151,30 @@ public class ApplicationConfig {
 
     @Bean
     RequestOtpService requestOtpService(OtpChallengeStore store, SecureCodeGenerator generator, SecretHasher hasher,
-                                        OtpSender sender, RateLimitGuard guard, OtpPolicy policy, Clock clock) {
-        return new RequestOtpService(store, generator, hasher, sender, guard, policy, clock);
+                                        OtpSender sender, RateLimitGuard guard, AuditLog auditLog,
+                                        OtpPolicy policy, Clock clock) {
+        return new RequestOtpService(store, generator, hasher, sender, guard, auditLog, policy, clock);
     }
 
     @Bean
     VerifyOtpService verifyOtpService(OtpChallengeStore store, SecretHasher hasher, UserRepository users,
-                                      TokenPairIssuer issuer, RateLimitGuard guard, OtpPolicy policy, Clock clock) {
-        return new VerifyOtpService(store, hasher, users, issuer, guard, policy, clock);
+                                      TokenPairIssuer issuer, RateLimitGuard guard, AuditLog auditLog,
+                                      OtpPolicy policy, Clock clock) {
+        return new VerifyOtpService(store, hasher, users, issuer, guard, auditLog, policy, clock);
     }
 
     @Bean
     ExternalSignInService externalSignInService(List<ExternalIdentityVerifier> verifiers, UserRepository users,
-                                                TokenPairIssuer issuer, RateLimitGuard guard,
+                                                TokenPairIssuer issuer, RateLimitGuard guard, AuditLog auditLog,
                                                 AuthProperties props, Clock clock) {
-        return new ExternalSignInService(verifiers, users, issuer, guard,
+        return new ExternalSignInService(verifiers, users, issuer, guard, auditLog,
                 rule(props.rateLimit().externalSignInPerIp()), clock);
     }
 
     @Bean
     SessionService sessionService(RefreshTokenStore store, UserRepository users, TokenPairIssuer issuer,
-                                  SecretHasher hasher, RateLimitGuard guard, TokenPolicy policy, Clock clock) {
-        return new SessionService(store, users, issuer, hasher, guard, policy, clock);
+                                  SecretHasher hasher, RateLimitGuard guard, AuditLog auditLog,
+                                  TokenPolicy policy, Clock clock) {
+        return new SessionService(store, users, issuer, hasher, guard, auditLog, policy, clock);
     }
 }

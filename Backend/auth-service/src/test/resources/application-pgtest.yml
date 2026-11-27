@@ -1,0 +1,13 @@
+# Full application on a real (embedded) PostgreSQL: Flyway + Hikari + JDBC adapters wired exactly as in production.
+management:
+  server:
+    port:
+auth:
+  persistence: postgres
+  hash-pepper: test-only-pepper-0123456789abcdef0123456789
+  otp:
+    sender: log
+  jwt:
+    allow-ephemeral-keys: true
+  google:
+    client-ids: test-client-id.apps.googleusercontent.com
