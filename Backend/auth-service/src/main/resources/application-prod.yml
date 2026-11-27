@@ -1,0 +1,12 @@
+# Production profile (SPRING_PROFILES_ACTIVE=prod). Secrets still come from environment variables.
+logging:
+  # One JSON object per log line (Elastic Common Schema): requestId, audit fields (event, userId, clientIp...)
+  # and access fields (http.status, duration_ms) become searchable in any log platform
+  # (Grafana Loki, ELK, Datadog, CloudWatch, Google Cloud Logging).
+  structured:
+    format:
+      console: ecs
+    ecs:
+      service:
+        name: auth-service
+        environment: production

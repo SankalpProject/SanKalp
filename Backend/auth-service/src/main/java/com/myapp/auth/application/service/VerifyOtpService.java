@@ -1,6 +1,9 @@
 package com.myapp.auth.application.service;
 
 import com.myapp.auth.application.port.in.VerifyOtpUseCase;
+import com.myapp.auth.application.port.out.AuditLog;
+import com.myapp.auth.application.port.out.AuditLog.AuditEvent;
+import com.myapp.auth.application.port.out.AuditLog.EventType;
 import com.myapp.auth.application.port.out.OtpChallengeStore;
 import com.myapp.auth.application.port.out.SecretHasher;
 import com.myapp.auth.application.port.out.UserRepository;
@@ -9,11 +12,10 @@ import com.myapp.auth.domain.model.AuthTokens;
 import com.myapp.auth.domain.model.EmailAddress;
 import com.myapp.auth.domain.model.OtpChallenge;
 import com.myapp.auth.domain.model.User;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Optional;
 
 /**
  * Verifies an email OTP and signs the user in (registering them on first login).
@@ -28,13 +30,14 @@ import java.time.Instant;
  */
 public final class VerifyOtpService implements VerifyOtpUseCase {
 
-    private static final Logger log = LoggerFactory.getLogger(VerifyOtpService.class);
+    private static final String METHOD = "email_otp";
 
     private final OtpChallengeStore challengeStore;
     private final SecretHasher hasher;
     private final UserRepository userRepository;
     private final TokenPairIssuer tokenPairIssuer;
     private final RateLimitGuard rateLimitGuard;
+    private final AuditLog auditLog;
     private final OtpPolicy policy;
     private final Clock clock;
 
@@ -43,6 +46,7 @@ public final class VerifyOtpService implements VerifyOtpUseCase {
                             UserRepository userRepository,
                             TokenPairIssuer tokenPairIssuer,
                             RateLimitGuard rateLimitGuard,
+                            AuditLog auditLog,
                             OtpPolicy policy,
                             Clock clock) {
         this.challengeStore = challengeStore;
@@ -50,6 +54,7 @@ public final class VerifyOtpService implements VerifyOtpUseCase {
         this.userRepository = userRepository;
         this.tokenPairIssuer = tokenPairIssuer;
         this.rateLimitGuard = rateLimitGuard;
+        this.auditLog = auditLog;
         this.policy = policy;
         this.clock = clock;
     }
@@ -57,37 +62,52 @@ public final class VerifyOtpService implements VerifyOtpUseCase {
     @Override
     public AuthTokens verifyOtp(VerifyOtpCommand command) {
         EmailAddress email = command.email();
-        rateLimitGuard.check("otp:verify:ip:" + command.clientIp(), policy.verifyPerIp());
-        rateLimitGuard.check("otp:verify:email:" + email.value(), policy.verifyPerEmail());
+        String ip = command.clientIp();
+        rateLimitGuard.check("otp_verify_per_ip", ip, policy.verifyPerIp(), ip);
+        rateLimitGuard.check("otp_verify_per_email", email.value(), policy.verifyPerEmail(), ip);
 
         Instant now = clock.instant();
-        OtpChallenge challenge = challengeStore.registerAttempt(email, now)
-                .orElseThrow(AuthException::invalidOtp);
+        Optional<OtpChallenge> reserved = challengeStore.registerAttempt(email, now);
+        if (reserved.isEmpty()) {
+            audit(EventType.LOGIN_FAILED, email, ip, "no_active_code");
+            throw AuthException.invalidOtp();
+        }
+        OtpChallenge challenge = reserved.get();
 
         if (challenge.attempts() > policy.maxAttempts()) {
             challengeStore.delete(email);
+            audit(EventType.OTP_LOCKED, email, ip, "max_attempts");
             throw AuthException.attemptsExceeded();
         }
 
         if (!OtpCodeHashing.matches(hasher, email, command.code(), challenge.codeHash())) {
-            log.info("OTP verification failed email={} attempt={}", email, challenge.attempts());
             if (challenge.attempts() >= policy.maxAttempts()) {
                 challengeStore.delete(email);
+                audit(EventType.OTP_LOCKED, email, ip, "max_attempts");
                 throw AuthException.attemptsExceeded();
             }
+            audit(EventType.LOGIN_FAILED, email, ip, "wrong_code");
             throw AuthException.invalidOtp();
         }
 
         // Single use: only the request that actually removes the challenge may proceed.
         if (!challengeStore.delete(email)) {
+            audit(EventType.LOGIN_FAILED, email, ip, "code_already_used");
             throw AuthException.invalidOtp();
         }
 
         // The OTP proves ownership of the mailbox, so this email is verified.
-        User user = userRepository.findByEmail(email)
-                .orElseGet(() -> userRepository.saveIfAbsent(User.register(email, now)));
+        User user = userRepository.findByEmail(email).orElseGet(() -> {
+            User created = userRepository.saveIfAbsent(User.register(email, now));
+            auditLog.record(AuditEvent.of(EventType.USER_REGISTERED).method(METHOD).user(created.id()).email(email).ip(ip));
+            return created;
+        });
 
-        log.info("Email OTP verified, session started userId={}", user.id());
+        auditLog.record(AuditEvent.of(EventType.LOGIN_SUCCEEDED).method(METHOD).user(user.id()).email(email).ip(ip));
         return tokenPairIssuer.issueNewSession(user, now);
+    }
+
+    private void audit(EventType type, EmailAddress email, String ip, String reason) {
+        auditLog.record(AuditEvent.of(type).method(METHOD).email(email).ip(ip).reason(reason));
     }
 }

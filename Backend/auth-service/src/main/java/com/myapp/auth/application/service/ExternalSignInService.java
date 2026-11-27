@@ -1,6 +1,9 @@
 package com.myapp.auth.application.service;
 
 import com.myapp.auth.application.port.in.ExternalSignInUseCase;
+import com.myapp.auth.application.port.out.AuditLog;
+import com.myapp.auth.application.port.out.AuditLog.AuditEvent;
+import com.myapp.auth.application.port.out.AuditLog.EventType;
 import com.myapp.auth.application.port.out.ExternalIdentityVerifier;
 import com.myapp.auth.application.port.out.RateLimiter;
 import com.myapp.auth.application.port.out.UserRepository;
@@ -9,13 +12,12 @@ import com.myapp.auth.domain.model.AuthTokens;
 import com.myapp.auth.domain.model.ExternalIdentity;
 import com.myapp.auth.domain.model.IdentityProvider;
 import com.myapp.auth.domain.model.User;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.util.EnumMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -32,12 +34,11 @@ import java.util.Map;
  */
 public final class ExternalSignInService implements ExternalSignInUseCase {
 
-    private static final Logger log = LoggerFactory.getLogger(ExternalSignInService.class);
-
     private final Map<IdentityProvider, ExternalIdentityVerifier> verifiers = new EnumMap<>(IdentityProvider.class);
     private final UserRepository userRepository;
     private final TokenPairIssuer tokenPairIssuer;
     private final RateLimitGuard rateLimitGuard;
+    private final AuditLog auditLog;
     private final RateLimiter.Rule perIpRule;
     private final Clock clock;
 
@@ -45,41 +46,62 @@ public final class ExternalSignInService implements ExternalSignInUseCase {
                                  UserRepository userRepository,
                                  TokenPairIssuer tokenPairIssuer,
                                  RateLimitGuard rateLimitGuard,
+                                 AuditLog auditLog,
                                  RateLimiter.Rule perIpRule,
                                  Clock clock) {
         verifiers.forEach(v -> this.verifiers.put(v.provider(), v));
         this.userRepository = userRepository;
         this.tokenPairIssuer = tokenPairIssuer;
         this.rateLimitGuard = rateLimitGuard;
+        this.auditLog = auditLog;
         this.perIpRule = perIpRule;
         this.clock = clock;
     }
 
     @Override
     public AuthTokens signIn(ExternalSignInCommand command) {
-        rateLimitGuard.check("external:signin:ip:" + command.clientIp(), perIpRule);
+        String ip = command.clientIp();
+        String method = command.provider().name().toLowerCase(Locale.ROOT);
+        rateLimitGuard.check("external_sign_in_per_ip", ip, perIpRule, ip);
 
         ExternalIdentityVerifier verifier = verifiers.get(command.provider());
         if (verifier == null) {
+            auditLog.record(AuditEvent.of(EventType.LOGIN_FAILED).method(method).ip(ip).reason("provider_disabled"));
             throw AuthException.invalidExternalToken();
         }
-        ExternalIdentity identity = verifier.verify(command.idToken());
+
+        ExternalIdentity identity;
+        try {
+            identity = verifier.verify(command.idToken());
+        } catch (AuthException e) {
+            auditLog.record(AuditEvent.of(EventType.LOGIN_FAILED).method(method).ip(ip).reason("invalid_token"));
+            throw e;
+        }
         if (!identity.emailVerified()) {
+            auditLog.record(AuditEvent.of(EventType.LOGIN_FAILED).method(method).email(identity.email()).ip(ip)
+                    .reason("email_not_verified"));
             throw AuthException.externalEmailNotVerified();
         }
 
         Instant now = clock.instant();
         User user = userRepository.findByExternalIdentity(identity.provider(), identity.subject())
-                .orElseGet(() -> linkOrRegister(identity, now));
+                .orElseGet(() -> linkOrRegister(identity, method, ip, now));
 
-        log.info("External sign-in provider={} userId={}", identity.provider(), user.id());
+        auditLog.record(AuditEvent.of(EventType.LOGIN_SUCCEEDED).method(method).user(user.id())
+                .email(identity.email()).ip(ip));
         return tokenPairIssuer.issueNewSession(user, now);
     }
 
-    private User linkOrRegister(ExternalIdentity identity, Instant now) {
-        User user = userRepository.findByEmail(identity.email())
-                .orElseGet(() -> userRepository.saveIfAbsent(User.register(identity.email(), now)));
+    private User linkOrRegister(ExternalIdentity identity, String method, String ip, Instant now) {
+        User user = userRepository.findByEmail(identity.email()).orElseGet(() -> {
+            User created = userRepository.saveIfAbsent(User.register(identity.email(), now));
+            auditLog.record(AuditEvent.of(EventType.USER_REGISTERED).method(method).user(created.id())
+                    .email(identity.email()).ip(ip));
+            return created;
+        });
         userRepository.linkExternalIdentity(user.id(), identity.provider(), identity.subject());
+        auditLog.record(AuditEvent.of(EventType.ACCOUNT_LINKED).method(method).user(user.id())
+                .email(identity.email()).ip(ip));
         return user;
     }
 }

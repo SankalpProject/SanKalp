@@ -1,11 +1,18 @@
 # LOCAL DEVELOPMENT ONLY. Never deploy with this profile.
 #
-# Your personal secrets (Gmail app password, Google client id...) go in ONE local file:
+# Your personal secrets (DB password, Gmail app password, Google client id...) go in ONE local file:
 #   auth-service/secrets.properties   (copy secrets.example.properties; it is git-ignored)
 # Values in that file override the defaults below. If the file doesn't exist, OTPs are printed to the console.
 spring:
   config:
     import: optional:file:./secrets.properties
+  # Local PostgreSQL (see README "Database setup"). Passwords are NOT here: put
+  # spring.datasource.password=... and spring.flyway.password=... in secrets.properties.
+  datasource:
+    url: jdbc:postgresql://localhost:5432/sankalp
+    username: sankalp_app          # runtime login: data only, no schema changes, audit is append-only
+  flyway:
+    user: sankalp_migrator         # schema owner: used only to run migrations at startup
 
 auth:
   hash-pepper: dev-only-pepper-change-me-0123456789abcdef

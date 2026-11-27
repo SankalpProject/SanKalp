@@ -21,13 +21,22 @@ import java.util.List;
 @Validated
 @ConfigurationProperties(prefix = "auth")
 public record AuthProperties(
+        @DefaultValue("postgres") @NotNull PersistenceType persistence,
         @NotBlank @Size(min = 32) String hashPepper,
         @Valid @NotNull Otp otp,
         @Valid @NotNull Jwt jwt,
         @Valid @NotNull Google google,
+        @Valid @NotNull @DefaultValue Audit audit,
         @Valid @NotNull RateLimit rateLimit) {
 
+    /** How long audit rows are kept in PostgreSQL. The database itself refuses anything below 30 days. */
+    public record Audit(@DefaultValue("180") @Min(30) @Max(3650) int retentionDays) {
+    }
+
     public enum OtpSenderType { LOG, SMTP }
+
+    /** Where users and refresh tokens are stored. See PostgresPersistenceConfig / InMemoryPersistenceConfig. */
+    public enum PersistenceType { POSTGRES, MEMORY }
 
     public record Otp(
             @Min(4) @Max(8) int length,

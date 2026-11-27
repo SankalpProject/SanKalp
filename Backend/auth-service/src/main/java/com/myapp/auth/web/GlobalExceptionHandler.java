@@ -2,6 +2,7 @@ package com.myapp.auth.web;
 
 import com.myapp.auth.domain.exception.AuthException;
 import com.myapp.auth.domain.exception.ErrorCode;
+import com.myapp.auth.infrastructure.observability.RequestContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
@@ -10,6 +11,7 @@ import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.lang.NonNull;
+import org.springframework.lang.Nullable;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -32,6 +34,7 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         HttpStatus status = statusFor(ex.code());
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, ex.getMessage());
         problem.setProperty("code", ex.code().name());
+        withRequestId(problem);
 
         ResponseEntity.BodyBuilder builder = ResponseEntity.status(status);
         ex.retryAfter().ifPresent(d -> {
@@ -47,6 +50,7 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         log.error("Unhandled error", ex);
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, "Something went wrong.");
         problem.setProperty("code", "INTERNAL_ERROR");
+        withRequestId(problem);
         return ResponseEntity.internalServerError().body(problem);
     }
 
@@ -62,7 +66,27 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "Request validation failed.");
         problem.setProperty("code", "VALIDATION_FAILED");
         problem.setProperty("fields", fields);
+        withRequestId(problem);
         return ResponseEntity.badRequest().body(problem);
+    }
+
+    /** Standard Spring MVC errors (404, 405, 415...) also get the request id. */
+    @Override
+    protected ResponseEntity<Object> createResponseEntity(@Nullable Object body, @NonNull HttpHeaders headers,
+                                                          @NonNull HttpStatusCode statusCode,
+                                                          @NonNull WebRequest request) {
+        if (body instanceof ProblemDetail problem) {
+            withRequestId(problem);
+        }
+        return super.createResponseEntity(body, headers, statusCode, request);
+    }
+
+    /** Lets support match a user's error screen to the exact server log lines. */
+    private static void withRequestId(ProblemDetail problem) {
+        String requestId = RequestContext.requestId();
+        if (requestId != null) {
+            problem.setProperty("requestId", requestId);
+        }
     }
 
     private static HttpStatus statusFor(ErrorCode code) {
